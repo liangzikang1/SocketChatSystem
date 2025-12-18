@@ -34,6 +34,8 @@ struct FileTransferStatus {
     uint64_t sent_size;
     float progress; // 0.0 ~ 1.0
     bool is_sending; // true=发送中, false=接收中
+    bool completed; // 传输是否完成
+    std::string saved_path; // 保存的完整路径（仅接收时使用）
 };
 
 struct AppContext {
@@ -89,6 +91,8 @@ void send_file(const std::string& filepath) {
         status.sent_size = 0;
         status.progress = 0.0f;
         status.is_sending = true;
+        status.completed = false;
+        status.saved_path = "";
         g_ctx.file_transfers.push_back(status);
     }
     
@@ -159,17 +163,16 @@ void send_file(const std::string& filepath) {
     
     file.close();
     
-    // 完成后从传输列表移除
+    // 完成后标记为完成状态
     if (sent == file_size) {
         g_ctx.recv_queue.push("SYSTEM:File sent successfully: " + filename);
         std::lock_guard<std::mutex> lock(g_ctx_mutex);
-        g_ctx.file_transfers.erase(
-            std::remove_if(g_ctx.file_transfers.begin(), g_ctx.file_transfers.end(),
-                [&filename](const FileTransferStatus& t) { 
-                    return t.filename == filename && t.is_sending; 
-                }),
-            g_ctx.file_transfers.end()
-        );
+        for (auto& transfer : g_ctx.file_transfers) {
+            if (transfer.filename == filename && transfer.is_sending) {
+                transfer.completed = true;
+                break;
+            }
+        }
     }
 }
 
@@ -228,6 +231,8 @@ void network_thread_func() {
                 status.sent_size = 0;
                 status.progress = 0.0f;
                 status.is_sending = false;
+                status.completed = false;
+                status.saved_path = save_path; // 保存文件路径
                 g_ctx.file_transfers.push_back(status);
                 
                 std::string sender(file_msg->sender, file_msg->sender_len);
@@ -249,25 +254,20 @@ void network_thread_func() {
                         if (transfer.filename == g_receiving_filename && !transfer.is_sending) {
                             transfer.sent_size = g_received_size;
                             transfer.progress = (float)g_received_size / g_expected_size;
+                            
+                            // 检查是否接收完成并标记
+                            if (g_received_size >= g_expected_size) {
+                                transfer.completed = true;
+                            }
                             break;
                         }
                     }
                 }
                 
-                // 检查是否接收完成
+                // 接收完成后关闭文件并发送系统消息
                 if (g_received_size >= g_expected_size) {
                     g_current_file.close();
                     g_ctx.recv_queue.push("SYSTEM:File received successfully: " + g_receiving_filename);
-                    
-                    // 从传输列表移除
-                    std::lock_guard<std::mutex> lock(g_ctx_mutex);
-                    g_ctx.file_transfers.erase(
-                        std::remove_if(g_ctx.file_transfers.begin(), g_ctx.file_transfers.end(),
-                            [](const FileTransferStatus& t) { 
-                                return t.filename == g_receiving_filename && !t.is_sending; 
-                            }),
-                        g_ctx.file_transfers.end()
-                    );
                 }
             }
         } else if (header.type == MSG_PROGRESS) {
@@ -460,8 +460,20 @@ int main(int, char**) {
             // 右侧聊天区域 (80% 宽度)
             ImGui::BeginGroup();
             
-            // 聊天历史区域
-            ImGui::BeginChild("ChatHistory", ImVec2(0, -ImGui::GetFrameHeightWithSpacing()), true);
+            // 计算需要为底部保留的空间
+            float bottom_reserve = ImGui::GetFrameHeightWithSpacing() * 2; // 输入框区域
+            
+            // 如果有文件传输，额外预留空间
+            {
+                std::lock_guard<std::mutex> lock(g_ctx_mutex);
+                if (!g_ctx.file_transfers.empty()) {
+                    // 每个传输项大约需要3行的高度
+                    bottom_reserve += ImGui::GetFrameHeightWithSpacing() * 3 * g_ctx.file_transfers.size() + 40;
+                }
+            }
+            
+            // 聊天历史区域 - 固定高度，只有这个区域可以滚动
+            ImGui::BeginChild("ChatHistory", ImVec2(0, -bottom_reserve), true);
             for (const auto& msg : g_ctx.chat_history) {
                 if (msg.sender == "System") {
                     // 系统消息居中，灰色
@@ -482,6 +494,65 @@ int main(int, char**) {
             if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY())
                 ImGui::SetScrollHereY(1.0f);
             ImGui::EndChild();
+            
+            // 文件传输进度显示 - 固定在底部上方
+            {
+                std::lock_guard<std::mutex> lock(g_ctx_mutex);
+                if (!g_ctx.file_transfers.empty()) {
+                    ImGui::Separator();
+                    ImGui::TextColored(ImVec4(0.2f, 0.8f, 1.0f, 1.0f), "File Transfers:");
+                    
+                    // 用于存储要删除的传输索引
+                    std::vector<size_t> to_remove;
+                    
+                    for (size_t i = 0; i < g_ctx.file_transfers.size(); ++i) {
+                        const auto& transfer = g_ctx.file_transfers[i];
+                        
+                        if (transfer.completed) {
+                            // 传输完成，显示更清晰的UI
+                            std::string label = transfer.is_sending ? "[Sent] " : "[Received] ";
+                            label += transfer.filename;
+                            ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "%s", label.c_str());
+                            
+                            // 按钮放在下一行，更容易看到
+                            ImGui::Indent(20.0f);
+                            
+                            // 只有接收的文件才显示"打开文件夹"按钮
+                            if (!transfer.is_sending && !transfer.saved_path.empty()) {
+                                std::string open_btn_id = "📁 Open Folder##" + std::to_string(i);
+                                if (ImGui::Button(open_btn_id.c_str())) {
+                                    // 在 macOS 上使用 open 命令打开 Finder 并选中文件
+                                    std::string cmd = "open -R \"" + transfer.saved_path + "\"";
+                                    system(cmd.c_str());
+                                }
+                                ImGui::SameLine();
+                            }
+                            
+                            std::string remove_btn_id = "Remove##" + std::to_string(i);
+                            if (ImGui::Button(remove_btn_id.c_str())) {
+                                to_remove.push_back(i);
+                            }
+                            
+                            ImGui::Unindent(20.0f);
+                        } else {
+                            // 传输进行中，显示进度条
+                            std::string label = transfer.is_sending ? "[Sending] " : "[Receiving] ";
+                            label += transfer.filename;
+                            ImGui::Text("%s", label.c_str());
+                            ImGui::SameLine();
+                            char progress_text[64];
+                            snprintf(progress_text, sizeof(progress_text), "%.1f%%", transfer.progress * 100.0f);
+                            ImGui::ProgressBar(transfer.progress, ImVec2(-1, 0), progress_text);
+                        }
+                    }
+                    
+                    // 删除标记的传输记录
+                    for (auto it = to_remove.rbegin(); it != to_remove.rend(); ++it) {
+                        g_ctx.file_transfers.erase(g_ctx.file_transfers.begin() + *it);
+                    }
+                    ImGui::Separator();
+                }
+            }
             
             // 输入框
             if (ImGui::InputText("##MessageInput", message_buf, IM_ARRAYSIZE(message_buf), ImGuiInputTextFlags_EnterReturnsTrue)) {
@@ -522,24 +593,6 @@ int main(int, char**) {
                         send_file(filepath);
                     });
                     send_thread.detach();
-                }
-            }
-            
-            // 文件传输进度显示
-            {
-                std::lock_guard<std::mutex> lock(g_ctx_mutex);
-                if (!g_ctx.file_transfers.empty()) {
-                    ImGui::Separator();
-                    ImGui::TextColored(ImVec4(0.2f, 0.8f, 1.0f, 1.0f), "File Transfers:");
-                    for (const auto& transfer : g_ctx.file_transfers) {
-                        std::string label = transfer.is_sending ? "[Sending] " : "[Receiving] ";
-                        label += transfer.filename;
-                        ImGui::Text("%s", label.c_str());
-                        ImGui::SameLine();
-                        char progress_text[64];
-                        snprintf(progress_text, sizeof(progress_text), "%.1f%%", transfer.progress * 100.0f);
-                        ImGui::ProgressBar(transfer.progress, ImVec2(-1, 0), progress_text);
-                    }
                 }
             }
             
