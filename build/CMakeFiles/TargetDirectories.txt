@@ -1,0 +1,5 @@
+/Users/liang/Desktop/program/c/SCS/build/CMakeFiles/server.dir
+/Users/liang/Desktop/program/c/SCS/build/CMakeFiles/client.dir
+/Users/liang/Desktop/program/c/SCS/build/CMakeFiles/client_gui.dir
+/Users/liang/Desktop/program/c/SCS/build/CMakeFiles/edit_cache.dir
+/Users/liang/Desktop/program/c/SCS/build/CMakeFiles/rebuild_cache.dir
