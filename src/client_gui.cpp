@@ -326,6 +326,34 @@ int main(int, char**) {
     ImGuiIO& io = ImGui::GetIO(); (void)io;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 
+    // Load custom fonts
+    // 1. Load Menlo for English (base font)
+    ImFontConfig config;
+    config.OversampleH = 2;
+    config.OversampleV = 2;
+    config.PixelSnapH = true;
+    
+    // Load Menlo.ttc as the primary font (16pt)
+    ImFont* font = io.Fonts->AddFontFromFileTTF("../lib/fonts/Menlo.ttc", 16.0f, &config);
+    if (font == nullptr) {
+        fprintf(stderr, "Failed to load Menlo.ttc, falling back to default font\n");
+    }
+    
+    // 2. Merge Songti for Chinese characters
+    ImFontConfig chinese_config;
+    chinese_config.MergeMode = true; // Merge into the previous font
+    chinese_config.OversampleH = 2;
+    chinese_config.OversampleV = 2;
+    chinese_config.PixelSnapH = true;
+    
+    // Use Chinese Simplified common glyph ranges
+    const ImWchar* glyph_ranges = io.Fonts->GetGlyphRangesChineseSimplifiedCommon();
+    
+    ImFont* chinese_font = io.Fonts->AddFontFromFileTTF("../lib/fonts/Songti.ttc", 16.0f, &chinese_config, glyph_ranges);
+    if (chinese_font == nullptr) {
+        fprintf(stderr, "Failed to load Songti.ttc, Chinese characters may not display correctly\n");
+    }
+
     // Setup Dear ImGui style
     ImGui::StyleColorsDark();
 
